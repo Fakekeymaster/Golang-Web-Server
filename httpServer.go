@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"io"
+	"sync"
+	"time"
 )
 
 //this function is run after we receive the request
@@ -92,7 +94,9 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 1) build target URL
 	path := r.URL.Path[len("/proxy"):]
-	target := "https://jsonplaceholder.typicode.com" + path
+
+	backend := getNextBackend()
+	target := backend + path
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}
@@ -130,6 +134,79 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
+type rateInfo struct {
+	count int
+	reset time.Time
+}
+
+var rateMap = make(map[string]*rateInfo)
+var mu sync.Mutex
+
+func rateLimit(next http.HandlerFunc) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		ip := strings.Split(r.RemoteAddr, ":")[0]
+		now := time.Now()
+
+		mu.Lock()
+		info, exists := rateMap[ip]
+
+		if !exists || now.After(info.reset) {
+			// new window
+			rateMap[ip] = &rateInfo{
+				count: 1,
+				reset: now.Add(1 * time.Minute),
+			}
+			mu.Unlock()
+			next(w, r)
+			return
+		}
+
+		if info.count >= 5 {
+			mu.Unlock()
+			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+
+		info.count++
+		mu.Unlock()
+
+		next(w, r)
+	}
+}
+
+func latencyLogger(next http.HandlerFunc) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		start := time.Now()
+
+		next(w, r)
+
+		duration := time.Since(start)
+
+		fmt.Println("Latency:", duration)
+	}
+}
+
+var backends = []string{
+	"https://jsonplaceholder.typicode.com",
+	"https://jsonplaceholder.typicode.com",
+}
+
+var counter int
+var lbMutex sync.Mutex
+
+func getNextBackend() string {
+	lbMutex.Lock()
+	defer lbMutex.Unlock()
+
+	backend := backends[counter%len(backends)]
+	counter++
+
+	return backend
+}
 
 func main() {
 	//route registration '/'
@@ -139,7 +216,7 @@ func main() {
 	//if '/about' is requested, call about func
 	http.HandleFunc("/about", about);
 
-	http.HandleFunc("/hello", logger(authorize(helloHandler)))
+	http.HandleFunc("/hello", latencyLogger(rateLimit(logger(authorize(helloHandler)))))
 
 	//http.HandleFunc("/proxy", logger(proxyHandler))
 
