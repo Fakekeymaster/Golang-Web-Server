@@ -1,3 +1,4 @@
+
 package main
 
 import (
@@ -86,27 +87,48 @@ func authorize(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
-	targetURL := "https://jsonplaceholder.typicode.com/todos/1"
-	//send request
-	resp, err := http.Get(targetURL)
+
+	// 1) build target URL
+	path := r.URL.Path[len("/proxy"):]
+	target := "https://jsonplaceholder.typicode.com" + path
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+
+	// 2) create new request with same method + body
+	req, err := http.NewRequest(r.Method, target, r.Body)
 	if err != nil {
-		http.Error(w, "error Fetching Data", http.StatusInternalServerError)
+		http.Error(w, "Failed to create request", http.StatusInternalServerError)
 		return
 	}
 
+	// 3) copy headers
+	req.Header = r.Header.Clone()
+
+	// 4) send request
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "Upstream request failed", http.StatusBadGateway)
+		return
+	}
 	defer resp.Body.Close()
 
-	//copy response to client
-	//convert stream to usable data
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, "Error reading Response", http.StatusInternalServerError)
+	// 5) copy response headers
+	for k, vals := range resp.Header {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
 	}
 
-	w.Write(body)
-}
+	// 6) status code
+	w.WriteHeader(resp.StatusCode)
 
+	// 7) stream body
+	io.Copy(w, resp.Body)
+}
 
 
 func main() {
@@ -119,7 +141,9 @@ func main() {
 
 	http.HandleFunc("/hello", logger(authorize(helloHandler)))
 
-	http.HandleFunc("/proxy", logger(proxyHandler))
+	//http.HandleFunc("/proxy", logger(proxyHandler))
+
+	http.HandleFunc("/proxy/", logger(authorize(proxyHandler)))
 	
 	//Starting server
 	fmt.Println("Web server is running")
